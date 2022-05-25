@@ -56,7 +56,8 @@ PICKLE_PROTOCOL = 2
 # So that test code can suppress some output:
 _silent = False
 
-
+# How many times to retry a failed exchange
+RETRIES = 5
 
 from zprocess.utils import (
     TimeoutError,
@@ -66,6 +67,8 @@ from zprocess.utils import (
     embed,
     raise_exception_in_thread,
     disable_quick_edit,
+    ZEncode,
+    ZDecode
 )
 
 from zprocess.clientserver import (

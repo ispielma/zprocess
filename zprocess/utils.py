@@ -292,3 +292,41 @@ def get_venv_executable_and_env(env=None):
         return base_executable, env
     return sys.executable, env
 
+def ZEncode(message):
+    """
+    Encodes a message with additional header information to help protect
+    against corrupted data.  This frequently occurs in networks with 
+    vunerability testing.
+    
+    This version is very simple creating messages of the form:
+        
+    LEN_message
+    
+    where LEN is the length of the message. This could be more coplex with
+    checksums or hashcodes, but even this simple solution will avoid every
+    error we have ever seen.
+    """
+    message = str(message)
+    chars = len(message)
+    zmessage = '{}_{}'.format(
+        str(chars),
+        message
+        )
+    return zmessage.encode('utf8')
+
+def ZDecode(zmessage):
+    """
+    Decodes a message encoded by ZEncode and returns None if the message 
+    was invalid
+    """
+    try:
+        chars, message = zmessage.split(b'_', 1)
+        chars = int(chars)
+    except: 
+        # Either zmessage was not bytes or chars was not an integer type
+        return None
+    
+    if chars != len(message):
+        return None
+    
+    return message

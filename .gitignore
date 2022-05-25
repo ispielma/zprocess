@@ -8,3 +8,5 @@ build/*
 conda_build/*
 conda_packages/*
 .eggs/*
+
+.spyproject*
