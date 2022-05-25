@@ -28,6 +28,8 @@ from zprocess.utils import (
     gethostbyname,
     Interruptor,
     Interrupted,
+    ZEncode,
+    ZDecode,
     TimeoutError,
     get_venv_executable_and_env,
     _get_fileno
@@ -220,16 +222,32 @@ class HeartbeatClient(object):
     def mainloop(self):
         try:
             pid = str(os.getpid()).encode('utf8')
+            zpid = ZEncode(pid)
             while True:
                 time.sleep(self.HEARTBEAT_INTERVAL)
-                self.sock.send(pid, zmq.NOBLOCK)
-                if not self.sock.poll(self.timeout * 1000):
-                    break
-                msg = self.sock.recv()
+
+                msg = None
+                attempt=0
+                while msg is None and attempt < zprocess.RETRIES:
+                    try:
+                        self.sock.send(zpid, zmq.NOBLOCK)
+                        if not self.sock.poll(self.timeout * 1000):
+                            break
+                        
+                        msg = ZDecode(self.sock.recv())
+                    except:
+                        # Bad network communiction?
+                        pass
+                    
+                    attempt += 1
+                
                 if not msg == pid:
                     break
+                
             if not zprocess._silent:
-                print('Heartbeat failure', file=sys.stderr)
+                print('Heartbeat failure (message, retries): ({}, {})'.format(msg, attempt), 
+                      file=sys.stderr)
+                
             os.kill(os.getpid(), signal.SIGTERM)
         except zmq.ContextTerminated:
             # Shutting down:
