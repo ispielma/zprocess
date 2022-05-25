@@ -227,30 +227,26 @@ class HeartbeatClient(object):
                 time.sleep(self.HEARTBEAT_INTERVAL)
 
                 msg = None
-                retries=0
-                while msg is None and retries < zprocess.RETRIES:
+                attempt=0
+                while msg is None and attempt < zprocess.RETRIES:
                     try:
                         self.sock.send(zpid, zmq.NOBLOCK)
                         if not self.sock.poll(self.timeout * 1000):
                             break
                         
-                        zmsg = self.sock.recv()
-                        msg = ZDecode(zmsg)
+                        msg = ZDecode(self.sock.recv())
                     except:
-                        # Bad network communication?
+                        # Bad network communiction?
                         pass
                     
-                    retries += 1
+                    attempt += 1
                 
                 if not msg == pid:
                     break
                 
             if not zprocess._silent:
-                err = 'Heartbeat failure (sent, received, retries): ({}, {}, {})'.format(
-                            pid, 
-                            zmsg.decode('utf8'), 
-                            retries)
-                print(err, file=sys.stderr)
+                print('Heartbeat failure (message, retries): ({}, {})'.format(msg, attempt), 
+                      file=sys.stderr)
                 
             os.kill(os.getpid(), signal.SIGTERM)
         except zmq.ContextTerminated:
