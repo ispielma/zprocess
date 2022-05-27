@@ -233,8 +233,8 @@ class HeartbeatClient(object):
                         self.sock.send(zpid, zmq.NOBLOCK)
                         if not self.sock.poll(self.timeout * 1000):
                             break
-                        
-                        msg = ZDecode(self.sock.recv())
+                        zmsg = self.sock.recv()
+                        msg = ZDecode(zmsg)
                     except:
                         # Bad network communiction?
                         pass
@@ -247,7 +247,7 @@ class HeartbeatClient(object):
             if not zprocess._silent:
                 err = 'Heartbeat failure (sent, recieved, retries): ({}, {}, {})'.format(
                             pid, 
-                            msg.decode('utf8'), 
+                            zmsg.decode('utf8'), 
                             retries)
                 print(err, file=sys.stderr)
                 
