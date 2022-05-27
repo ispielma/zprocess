@@ -306,13 +306,13 @@ def ZEncode(message):
     checksums or hashcodes, but even this simple solution will avoid every
     error we have ever seen.
     """
-    message = str(message)
-    chars = len(message)
-    zmessage = '{}_{}'.format(
-        str(chars),
-        message
-        )
-    return zmessage.encode('utf8')
+    if type(message) != bytes:
+        message = str(message)
+        
+    chars = str(len(message)).encode('utf8')
+    zmessage = chars + b'_' + message
+
+    return zmessage
 
 def ZDecode(zmessage):
     """
