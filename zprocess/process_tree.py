@@ -245,8 +245,16 @@ class HeartbeatClient(object):
                     break
                 
             if not zprocess._silent:
+<<<<<<< HEAD
                 print('Heartbeat failure (message, retries): ({}, {})'.format(msg, attempt), 
                       file=sys.stderr)
+=======
+                err = 'Heartbeat failure (sent, recieved, retries): ({}, {}, {})'.format(
+                            pid, 
+                            msg.decode('utf8'), 
+                            retries)
+                print(err, file=sys.stderr)
+>>>>>>> parent of 5a13154 (Correct error logging for when bad message arrives.)
                 
             os.kill(os.getpid(), signal.SIGTERM)
         except zmq.ContextTerminated:
