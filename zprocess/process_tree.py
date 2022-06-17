@@ -233,13 +233,13 @@ class HeartbeatClient(object):
                     try:
                         self.sock.send(zpid, zmq.NOBLOCK)
                         if not self.sock.poll(self.timeout * 1000):
-                            zmsg = ''
+                            zmsg = " ".encode('utf8')
                             errmsg = 'timeout error'
                             break
                         zmsg = self.sock.recv()
                         msg = ZDecode(zmsg)
                     except:
-                        zmsg = ''
+                        zmsg = " ".encode('utf8')
                         errmsg = 'network error'
                         pass
                     
