@@ -1,46 +1,19 @@
-from __future__ import print_function, unicode_literals, division
 import sys
 import base64
 import weakref
-import os
+import threading
 import ipaddress
+from time import monotonic
+
 import zmq
 import zmq.auth.thread
 from zmq.utils.monitor import recv_monitor_message
 
 from zprocess.utils import _get_fileno
-
-_path, _cwd = os.path.split(os.getcwd())
-if _cwd == 'zprocess' and _path not in sys.path:
-    # Running from within zprocess dir? Add to sys.path for testing during
-    # development:
-    sys.path.insert(0, _path)
-
 from zprocess.utils import gethostbyname, Interrupted, TimeoutError
 
-if sys.version_info[0] == 2:
-    str = unicode
-    from time import time as monotonic
-else:
-    from time import monotonic
 
-
-_bundle_warning = """zprocess warning: pyzmq is using bundled libzmq, which on Windows
-is not built with the cryptography library libsodium. Encryption/decryption will be
-slow. Use the conda pyzmq package for fast cryptography.\n"""
-
-
-def _check_versions():
-    """Check for bundled zmq on windows. It has slow crypto - warn the user"""
-    if os.name != 'nt':
-        return
-    try:
-        import zmq.libzmq
-    except ImportError:
-        # No bundled zmq.
-        return
-    if sys.stderr is not None and _get_fileno(sys.stderr) >= 0:
-        sys.stderr.write(_bundle_warning)
+PYZMQ_VER_MAJOR = int(zmq.__version__.split('.')[0])
 
 # Events to tell when a conneciton has succeeded, including authentication:
 CONN_SUCCESS_EVENTS = {zmq.EVENT_HANDSHAKE_SUCCEEDED}
@@ -90,7 +63,6 @@ def generate_shared_secret():
     encoding, and return the result as a base64 encoded unicode string as suitable
     for passing to SecureContext() or storing on disk. We use base64 because it is
     more compatible with Python config files than z85."""
-    _check_versions()
     _, client_secret = zmq.curve_keypair()
     _, server_secret = zmq.curve_keypair()
     return base64.b64encode(zmq.utils.z85.decode(client_secret) + 
@@ -165,9 +137,10 @@ class SecureSocket(zmq.Socket):
         are a server or not"""
         orig_server = self.curve_server
         if server:
+            self.curve_server = True
+            self.zap_domain = self.context.zap_domain
             self.curve_publickey = self.context.server_publickey
             self.curve_secretkey = self.context.server_secretkey
-            self.curve_server = True
         else:
             self.curve_server = False
             self.curve_publickey = self.context.client_publickey
@@ -306,6 +279,72 @@ class SecureSocket(zmq.Socket):
                 return msg
 
 
+class _ThreadAuthenticator:
+    # We roll our own thread authenticator (just implementing what we need) since a)
+    # zmq.auth.thread.ThreadAuthenticator uses asyncio, and we do not want to express an
+    # opinion on the kerfuffle that is Windows asyncio selectors (see:
+    # https://github.com/zeromq/pyzmq/issues/1423) and impose it on the rest of the
+    # interpreter, when we're not even using async stuff ourself and b)
+    # zmq.auth.thread.ThreadAuthenticator spawns a non-daemon thread which is difficult
+    # to ensure gets shut down at interpreter shutdown, and otherwise holds the
+    # interpreter open.
+    def __init__(self, ctx, zap_domain, allowed_clients):
+        if PYZMQ_VER_MAJOR >= 25:
+            self.zap_socket = ctx.socket(zmq.REP, socket_class=zmq.Socket)
+        else:
+            self.zap_socket = ctx.socket(zmq.REP)
+        self.zap_socket.linger = 1
+        self.zap_socket.bind("inproc://zeromq.zap.01")
+
+        # Note: we hold a reference to the zap socket, since if the thread crashes, we
+        # don't want the socket to be cleaned up and closed - that would have zmq
+        # (stupidly and dangerously) fall back to its default authentication method,
+        # which is to allow all.
+        self.thread = threading.Thread(
+            target=self.run,
+            args=(self.zap_socket, zap_domain, allowed_clients),
+            daemon=True,
+        )
+        self.started = threading.Event()
+        self.thread.start()
+
+    def run(self, zap_socket, zap_domain, allowed_clients):
+        VERSION = b'1.0'
+        MECHANISM = b'CURVE'
+        while True:
+            try:
+                msg = zap_socket.recv_multipart()
+            except zmq.error.ContextTerminated:
+                zap_socket.close()
+                return
+            version, request_id, domain, address, identity, mechanism = msg[:6]
+            credentials = msg[6:]
+            if version != VERSION:
+                status_code = b"400"
+                status_text = b"Invalid version"
+                user_id = b""
+            elif mechanism != MECHANISM:
+                status_code = b"400"
+                status_text = b"Security mechanism not supported"
+                user_id = b""
+            elif domain != zap_domain:
+                status_code = b"400"
+                status_text = b"Unknown domain"
+                user_id = b""
+            else:
+                key = zmq.utils.z85.encode(credentials[0])
+                if key in allowed_clients:
+                    status_code = b"200"
+                    status_text = b"OK"
+                    user_id = key
+                else:
+                    status_code = b"400"
+                    status_text = b"Unknown key"
+                    user_id = b""
+            response = [VERSION, request_id, status_code, status_text, user_id, b""]
+            zap_socket.send_multipart(response)
+
+
 class SecureContext(zmq.Context):
     """A ZeroMQ Context with SecureContext.socket() returning a
     SecureSocket(), which can authenticate and communicate securely with all
@@ -315,7 +354,10 @@ class SecureContext(zmq.Context):
 
     _socket_class = SecureSocket
     _instances = weakref.WeakValueDictionary()
+    zap_domain = b"zprocess"
+
     # Dummy class attrs to distinguish from zmq options:
+    auth = None
     secure = False
     client_publickey = None
     client_secretkey = None
@@ -325,17 +367,20 @@ class SecureContext(zmq.Context):
     def __init__(self, io_threads=1, shared_secret=None):
         zmq.Context.__init__(self, io_threads)
         if shared_secret is not None:
-            _check_versions()
             keys = _unpack_shared_secret(shared_secret)
             self.client_secretkey, self.server_secretkey = keys
             self.client_publickey = zmq.curve_public(self.client_secretkey)
             self.server_publickey = zmq.curve_public(self.server_secretkey)
-            # Don't hold ref to auth: needed for auto cleanup at shutdown:
-            auth = zmq.auth.thread.ThreadAuthenticator(self)
-            auth.start()
-            # Allow only clients who have the client public key:
-            auth.thread.authenticator.allow_any = False
-            auth.thread.authenticator.certs['*'] = {self.client_publickey: True}
+            
+            # Note: it is crucial we hold a reference to the authenticator, so that in
+            # the case the zap authentication thread crashes, the zap socket does not
+            # get cleaned up and closed - zmq will interpret that situation as us not
+            # requiring any authentication.
+            self.auth = _ThreadAuthenticator(
+                self,
+                zap_domain=self.zap_domain,
+                allowed_clients=[self.client_publickey],
+            )
             self.secure = True
 
     @classmethod
@@ -351,19 +396,3 @@ class SecureContext(zmq.Context):
             instance = cls(io_threads, shared_secret=shared_secret)
             cls._instances[cls, shared_secret] = instance
             return instance
-
-
-# if __name__ == '__main__':
-#     shared_secret = generate_shared_secret()
-#     other_secret = generate_shared_secret()
-
-#     server_ctx = SecureContext.instance(shared_secret=shared_secret)
-#     client_ctx = SecureContext.instance(shared_secret=shared_secret)
-
-#     server = server_ctx.socket(zmq.REP)
-#     client = client_ctx.socket(zmq.REQ)
-
-#     server.bind("tcp://127.0.0.1:6666")
-#     client.connect("tcp://127.0.0.1:6666", timeout=None)
-#     client.send(b'hello')
-#     assert server.recv() == b'hello'
