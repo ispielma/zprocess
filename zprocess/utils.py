@@ -293,7 +293,6 @@ def ZEncode(message):
     checksums or hashcodes, but even this simple solution will avoid every
     error we have ever seen.
     """
-    
     if type(message) != bytes:
         message = str(message)
         

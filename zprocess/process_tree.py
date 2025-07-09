@@ -206,30 +206,36 @@ class HeartbeatClient(object):
             zpid = ZEncode(pid)
             while True:
                 time.sleep(self.HEARTBEAT_INTERVAL)
-
+                
+                errmsg = ''
                 msg = None
                 retries=0
                 while msg is None and retries < zprocess.RETRIES:
                     try:
                         self.sock.send(zpid, zmq.NOBLOCK)
                         if not self.sock.poll(self.timeout * 1000):
+                            zmsg = " ".encode('utf8')
+                            errmsg = 'timeout error'
                             break
-                        
-                        msg = ZDecode(self.sock.recv())
+                        zmsg = self.sock.recv()
+                        msg = ZDecode(zmsg)
                     except:
-                        # Bad network communiction?
+                        zmsg = " ".encode('utf8')
+                        errmsg = 'network error'
                         pass
                     
                     retries += 1
                 
                 if not msg == pid:
+                    errmsg = 'wrong response'
                     break
                 
             if not zprocess._silent:
-                err = 'Heartbeat failure (sent, recieved, retries): ({}, {}, {})'.format(
-                            pid, 
-                            msg.decode('utf8'), 
-                            retries)
+                err = 'Heartbeat failure (sent, recieved, retries, reason): ({}, {}, {}, {})'.format(
+                            pid.decode('utf8'), 
+                            zmsg.decode('utf8'), 
+                            retries,
+                            errmsg)
                 print(err, file=sys.stderr)
                 
             os.kill(os.getpid(), signal.SIGTERM)
@@ -428,7 +434,7 @@ class WriteQueue(object):
         self.sock = sock
         self.lock = threading.Lock()
         self.poller = zmq.Poller()
-        self.poller.register(self.sock, zmq.POLLOUT)
+        self.poller.register(self.sock)
         self.interruptor = Interruptor()
 
     def put(self, obj, timeout=None, interruptor=None):
@@ -441,7 +447,7 @@ class WriteQueue(object):
         with self.lock:
             try:
                 interruption_sock = interruptor.subscribe()
-                self.poller.register(interruption_sock, zmq.POLLIN)
+                self.poller.register(interruption_sock)
                 while True:
                     if timeout is not None:
                         timeout = max(0, (deadline - monotonic()) * 1000)
@@ -487,18 +493,18 @@ class ReadQueue(object):
 
     def __init__(self, sock):
         self.sock = sock
-        self.to_self = sock.context.socket(zmq.PAIR)
-        self.from_self = sock.context.socket(zmq.PAIR)
+        self.to_self = sock.context.socket(zmq.PUSH)
+        self.from_self = sock.context.socket(zmq.PULL)
         self_endpoint = 'inproc://zpself' + hexlify(os.urandom(8)).decode()
         self.from_self.bind(self_endpoint)
         self.to_self.connect(self_endpoint)
         self.lock = threading.Lock()
         self.to_self_lock = threading.Lock()
         self.in_poller = zmq.Poller()
-        self.in_poller.register(self.sock, zmq.POLLIN)
-        self.in_poller.register(self.from_self, zmq.POLLIN)
+        self.in_poller.register(self.sock)
+        self.in_poller.register(self.from_self)
         self.out_poller = zmq.Poller()
-        self.out_poller.register(self.to_self, zmq.POLLOUT)
+        self.out_poller.register(self.to_self)
         self.interruptor = Interruptor()
 
     def get(self, timeout=None, interruptor=None):
@@ -514,7 +520,7 @@ class ReadQueue(object):
         with self.lock:
             try:
                 interruption_sock = interruptor.subscribe()
-                self.in_poller.register(interruption_sock, zmq.POLLIN)
+                self.in_poller.register(interruption_sock)
                 events = dict(self.in_poller.poll(timeout))
                 if not events:
                     raise TimeoutError('get() timed out')
@@ -540,7 +546,7 @@ class ReadQueue(object):
         with self.to_self_lock:
             try:
                 interruption_sock = interruptor.subscribe()
-                self.out_poller.register(interruption_sock, zmq.POLLOUT)
+                self.out_poller.register(interruption_sock)
                 while True:
                     if timeout is not None:
                         timeout = max(0, (deadline - monotonic()) * 1000)
@@ -1299,8 +1305,8 @@ class ProcessTree(object):
         Process.interrupt_startup() (such as Process.terminate()) may wish to terminate
         the child process. TODO finish this and other docstrings."""
         context = SecureContext.instance(shared_secret=self.shared_secret)
-        to_child = context.socket(zmq.PAIR, allow_insecure=self.allow_insecure)
-        from_child = context.socket(zmq.PAIR, allow_insecure=self.allow_insecure)
+        to_child = context.socket(zmq.PUSH, allow_insecure=self.allow_insecure)
+        from_child = context.socket(zmq.PULL, allow_insecure=self.allow_insecure)
 
         from_child_port = from_child.bind_to_random_port('tcp://*')
         to_child_port = to_child.bind_to_random_port('tcp://*')
@@ -1426,8 +1432,8 @@ class ProcessTree(object):
             self.zlock_client.set_process_name(name)
 
         context = SecureContext.instance(shared_secret=self.shared_secret)
-        to_parent = context.socket(zmq.PAIR, allow_insecure=self.allow_insecure)
-        from_parent = context.socket(zmq.PAIR, allow_insecure=self.allow_insecure)
+        to_parent = context.socket(zmq.PUSH, allow_insecure=self.allow_insecure)
+        from_parent = context.socket(zmq.PULL, allow_insecure=self.allow_insecure)
 
         from_parent.connect(
             'tcp://%s:%d' % (self.parent_host, parentinfo['from_parent_port'])
