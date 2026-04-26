@@ -171,6 +171,8 @@ class HeartbeatServer(object):
 
 class HeartbeatClient(object):
 
+    DEFAULT_ALLOWED_MISSED_HEARTBEATS = 5
+
     # How long between heartbeats?
     HEARTBEAT_INTERVAL = 1
     # How long without a heartbeat until we kill the process? Wait longer when the
@@ -181,33 +183,51 @@ class HeartbeatClient(object):
     """A heartbeating thread that terminates the process if it doesn't get the
     heartbeats back within one second, unless a lock is held."""
     def __init__(self, server_host, server_port,
-                 shared_secret=None, allow_insecure=False):
+                 shared_secret=None, allow_insecure=False,
+                 allowed_missed_heartbeats=DEFAULT_ALLOWED_MISSED_HEARTBEATS):
         self.lock = KillLock()
-        context = SecureContext.instance(shared_secret=shared_secret)
-        self.sock = context.socket(zmq.REQ, allow_insecure=allow_insecure)
-        self.sock.setsockopt(zmq.LINGER, 0)
         server_ip = gethostbyname(server_host)
-        self.sock.connect('tcp://{}:{}'.format(server_ip, server_port))
-        self.mainloop_thread = threading.Thread(target=self.mainloop)
-        self.mainloop_thread.daemon = True
-        self.mainloop_thread.start()
         if isinstance(server_ip, bytes):
             server_ip = server_ip.decode()
+        self.context = SecureContext.instance(shared_secret=shared_secret)
+        self.allow_insecure = allow_insecure
+        self.endpoint = 'tcp://{}:{}'.format(server_ip, server_port)
+        self.sock = self._new_socket()
+        self.allowed_missed_heartbeats = allowed_missed_heartbeats
+        self.missed_parent_contacts = 0
         if ipaddress.ip_address(server_ip).is_loopback:
             self.timeout = self.LOCALHOST_TIMEOUT
         else:
             self.timeout = self.REMOTE_TIMEOUT
+        self.mainloop_thread = threading.Thread(target=self.mainloop)
+        self.mainloop_thread.daemon = True
+        self.mainloop_thread.start()
+
+    def _new_socket(self):
+        sock = self.context.socket(zmq.REQ, allow_insecure=self.allow_insecure)
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(self.endpoint)
+        return sock
 
     def mainloop(self):
         try:
             pid = str(os.getpid()).encode('utf8')
             while True:
                 time.sleep(self.HEARTBEAT_INTERVAL)
-                self.sock.send(pid, zmq.NOBLOCK)
-                if not self.sock.poll(self.timeout * 1000):
-                    break
-                msg = self.sock.recv()
-                if not msg == pid:
+                try:
+                    self.sock.send(pid, zmq.NOBLOCK)
+                    if self.sock.poll(self.timeout * 1000):
+                        msg = self.sock.recv()
+                        if msg == pid:
+                            self.missed_parent_contacts = 0
+                            continue
+                except zmq.ZMQError:
+                    pass
+
+                self.missed_parent_contacts += 1
+                self.sock.close(linger=0)
+                self.sock = self._new_socket()
+                if self.missed_parent_contacts >= self.allowed_missed_heartbeats:
                     break
             if not zprocess._silent:
                 print('Heartbeat failure', file=sys.stderr)
@@ -1259,6 +1279,7 @@ class ProcessTree(object):
         output_redirection_port=None,
         remote_process_client=None,
         startup_timeout=5,
+        allowed_missed_heartbeats=HeartbeatClient.DEFAULT_ALLOWED_MISSED_HEARTBEATS,
         pymodule=False,
         args=None,
         startup_queue=None,
@@ -1325,6 +1346,7 @@ class ProcessTree(object):
             'from_parent_port': to_child_port,
             'heartbeat_server_host': 'localhost',
             'heartbeat_server_port': self.heartbeat_server.port,
+            'allowed_missed_heartbeats': allowed_missed_heartbeats,
             'broker_host': self.broker_host,
             'broker_in_port': self.broker_in_port,
             'broker_out_port': self.broker_out_port,
@@ -1442,6 +1464,10 @@ class ProcessTree(object):
             heartbeat_server_port,
             shared_secret=self.shared_secret,
             allow_insecure=self.allow_insecure,
+            # TODO: remove legacy code in the future (introduced 2026)
+            # Older parents will not include this field, so preserve the legacy
+            # single-miss behavior when connecting to them.
+            allowed_missed_heartbeats=parentinfo.get('allowed_missed_heartbeats', 1),
         )
 
         self.broker_host = parentinfo['broker_host']
