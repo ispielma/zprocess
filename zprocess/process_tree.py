@@ -184,6 +184,7 @@ class HeartbeatClient(object):
     heartbeats back within one second, unless a lock is held."""
     def __init__(self, server_host, server_port,
                  shared_secret=None, allow_insecure=False,
+                 heartbeat_interval=HEARTBEAT_INTERVAL,
                  allowed_missed_heartbeats=DEFAULT_ALLOWED_MISSED_HEARTBEATS):
         self.lock = KillLock()
         server_ip = gethostbyname(server_host)
@@ -192,6 +193,7 @@ class HeartbeatClient(object):
         self.context = SecureContext.instance(shared_secret=shared_secret)
         self.allow_insecure = allow_insecure
         self.endpoint = 'tcp://{}:{}'.format(server_ip, server_port)
+        self.heartbeat_interval = heartbeat_interval
         self.sock = self._new_socket()
         self.allowed_missed_heartbeats = allowed_missed_heartbeats
         self.missed_parent_contacts = 0
@@ -213,7 +215,7 @@ class HeartbeatClient(object):
         try:
             pid = str(os.getpid()).encode('utf8')
             while True:
-                time.sleep(self.HEARTBEAT_INTERVAL)
+                time.sleep(self.heartbeat_interval)
                 try:
                     self.sock.send(pid, zmq.NOBLOCK)
                     if self.sock.poll(self.timeout * 1000):
@@ -1279,6 +1281,7 @@ class ProcessTree(object):
         output_redirection_port=None,
         remote_process_client=None,
         startup_timeout=5,
+        heartbeat_interval=HeartbeatClient.HEARTBEAT_INTERVAL,
         allowed_missed_heartbeats=HeartbeatClient.DEFAULT_ALLOWED_MISSED_HEARTBEATS,
         pymodule=False,
         args=None,
@@ -1346,6 +1349,7 @@ class ProcessTree(object):
             'from_parent_port': to_child_port,
             'heartbeat_server_host': 'localhost',
             'heartbeat_server_port': self.heartbeat_server.port,
+            'heartbeat_interval': heartbeat_interval,
             'allowed_missed_heartbeats': allowed_missed_heartbeats,
             'broker_host': self.broker_host,
             'broker_in_port': self.broker_in_port,
@@ -1464,6 +1468,10 @@ class ProcessTree(object):
             heartbeat_server_port,
             shared_secret=self.shared_secret,
             allow_insecure=self.allow_insecure,
+            heartbeat_interval=parentinfo.get(
+                'heartbeat_interval',
+                HeartbeatClient.HEARTBEAT_INTERVAL,
+            ),
             # TODO: remove legacy code in the future (introduced 2026)
             # Older parents will not include this field, so preserve the legacy
             # single-miss behavior when connecting to them.

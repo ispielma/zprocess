@@ -338,15 +338,20 @@ class HeartbeatTests(unittest.TestCase):
     def setUp(self):
         self.heartbeat_server = None
 
-    def _process_tree(self, allowed_missed_heartbeats=None):
-        if allowed_missed_heartbeats is None:
+    def _process_tree(
+        self, allowed_missed_heartbeats=None, heartbeat_interval=None
+    ):
+        if allowed_missed_heartbeats is None and heartbeat_interval is None:
             return _default_process_tree
 
         class ConfiguredHeartbeatProcessTree(type(_default_process_tree)):
             def subprocess(tree_self, *args, **kwargs):
-                kwargs.setdefault(
-                    'allowed_missed_heartbeats', allowed_missed_heartbeats
-                )
+                if allowed_missed_heartbeats is not None:
+                    kwargs.setdefault(
+                        'allowed_missed_heartbeats', allowed_missed_heartbeats
+                    )
+                if heartbeat_interval is not None:
+                    kwargs.setdefault('heartbeat_interval', heartbeat_interval)
                 return super(
                     ConfiguredHeartbeatProcessTree, tree_self
                 ).subprocess(*args, **kwargs)
@@ -363,12 +368,19 @@ class HeartbeatTests(unittest.TestCase):
         return process_tree
 
     def _start_heartbeat_process(
-        self, allowed_missed_heartbeats=None, script=None, default='good'
+        self,
+        allowed_missed_heartbeats=None,
+        heartbeat_interval=None,
+        script=None,
+        default='good',
     ):
         self.heartbeat_server = ScriptedHeartbeatServer(
             shared_secret, script or [], default=default
         )
-        process_tree = self._process_tree(allowed_missed_heartbeats)
+        process_tree = self._process_tree(
+            allowed_missed_heartbeats,
+            heartbeat_interval=heartbeat_interval,
+        )
         self.process = HeartbeatClientTestProcess(process_tree=process_tree)
         return self.process.start()
 
@@ -479,6 +491,18 @@ class HeartbeatTests(unittest.TestCase):
         )
         self._assert_alive_after_requests(4, 8)
         self._assert_intervals_are_immediate_retries(1.5)
+
+    def test_configured_heartbeat_interval_controls_request_cadence(self):
+        self._start_heartbeat_process(
+            allowed_missed_heartbeats=3,
+            heartbeat_interval=0.2,
+        )
+        self.assertTrue(self.heartbeat_server.wait_for_requests(3, 3))
+        intervals = self.heartbeat_server.inter_request_intervals()[:2]
+        self.assertTrue(
+            all(0.1 <= interval < 0.8 for interval in intervals),
+            'expected configured heartbeat-sized gaps, got %r' % intervals,
+        )
 
     def test_subproc_survives_until_kill_lock_released(self):
         to_child, from_child = self._start_heartbeat_process(
